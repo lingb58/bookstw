@@ -1,0 +1,359 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import re
+# import socket
+# import string
+import time
+from functools import partial
+
+try:
+    from queue import Empty, Queue
+except ImportError:
+    from Queue import Empty, Queue
+
+from threading import Thread
+
+# try:
+#     from urllib.parse import urlparse, urlencode
+# except ImportError:
+#     from urlparse import urlparse, urlencode
+
+try:
+    from queue import Empty, Queue
+except ImportError:
+    from Queue import Empty, Queue
+
+# from mechanize import HTTPError
+
+from calibre import as_unicode, browser, random_user_agent, xml_replace_entities
+from calibre.ebooks.metadata.book.base import Metadata
+from calibre.ebooks.metadata.sources.base import Option, Source, fixauthors, fixcase
+# from calibre.utils.icu import lower as icu_lower
+# from calibre.utils.localization import canonicalize_lang
+from calibre.utils.random_ua import accept_header_for_ua
+
+# from calibre import as_unicode, prepare_string_for_xml, replace_entities
+from calibre.ebooks.chardet import xml_to_unicode
+from calibre.ebooks.metadata import authors_to_string, check_isbn
+from calibre.utils.cleantext import clean_ascii_chars
+from calibre.utils.localization import canonicalize_lang
+
+# from calibre.utils.date import parse_date
+from lxml import etree, html
+
+def user_agent_is_ok(ua):
+    return 'Mobile/' not in ua and 'Mobile ' not in ua
+
+def parse_html(raw):
+    try:
+        from html5_parser import parse
+    except ImportError:
+        # Old versions of calibre
+        import html5lib
+        return html5lib.parse(raw, treebuilder='lxml', namespaceHTMLElements=False)
+    else:
+        return parse(raw)
+
+class BooksTW(Source):
+
+    name = 'BooksTW'
+    description = 'Download metadata from books.com.tw'
+    supported_platforms = ['windows', 'osx', 'linux']
+    author              = 'Robin Lin'  # The author of this plugin
+    version             = (0, 0, 1)   # The version number of this plugin
+    can_get_multiple_covers = False
+    prefer_results_with_isbn = True
+    supports_search_by_isbn = True
+    # minimum_calibre_version = (8, 3, 0)
+
+    _query_count = 0
+    MAX_QUERY_COUNT = 5
+
+    capabilities = frozenset(['identify'])#, 'cover'])
+    touched_fields = frozenset([
+        'identifier:isbn', 'identifier:bookstw', 'title', 'authors','rating', 
+        'comments', 'publisher', 'pubdate', 'languages'])  #'tags', 'series',
+    # has_html_comments = False
+    # supports_gzip_transfer_encoding = False
+
+    BASE_URL = 'https://www.books.com.tw'
+
+    def identify(self, log, result_queue, abort, title=None, authors=None,
+            identifiers={}, timeout=30):
+        books = None
+        self._query_count = 0
+        items = list(identifiers.items())
+        try:
+            if items:
+                # try to find the book by identifiers
+                for id_type, val in items:
+                    if id_type.lower() == 'isbn':
+                        books = self.search_books(log, val, timeout=timeout)
+                        break
+                    if id_type.lower() == 'bookstw':
+                        books = self.search_books(log, val, timeout=timeout)
+                        break
+            if not books:
+                query_string = ""
+                if title:
+                    query_string += " " + title
+                if authors:
+                    query_string += " " + ' '.join(authors)
+                books = self.search_books(log, query_string, timeout=timeout)
+        except Exception as e:
+            log.error(f'Search failed: {e}')
+        
+        if not books:
+            log.info("Can't find relative book.")
+
+        for book in books:
+            try:
+                one = self.download_metadata(log, result_queue, book, timeout=timeout)
+                if one:
+                    result_queue.put(one)
+            except Exception as e:
+                log.error(f'Download metadata failed ({book}): {e}')
+
+    def search_books(self, log, key, timeout=30):
+        # SEARCH_URL = 'https://search.books.com.tw/search/query/key/%s/cat/all'
+        SEARCH_URL = 'https://search.books.com.tw/search/query/key/%s/cat/BKA'
+        url = SEARCH_URL % key
+        # log.info(f'查詢 URL: {url}')
+
+        try:
+            r = self.browser.open(url, timeout=timeout)
+            raw = r.read()
+            # log.info(raw.decode('utf-8'))
+            doc = html.fromstring(raw.decode('utf-8'))
+        except Exception as e:
+            log.error(f'Open book page failed: {e}')
+            return None
+
+        if '很抱歉，您搜尋的商品已下架' in doc or '抱歉，找不到您所查詢的' in doc:
+            log.info(f"Can't find the keyword: {key}")
+            return None
+
+        books = []
+        # for data in doc.xpath('//div[@class="table-searchbox clearfix" or @class="nw_katalog_lista_ksiazka ebook promocja"]'):
+        for data in doc.xpath('//div[@class="table-searchbox clearfix"]'):
+            for book_url in data.xpath('.//div[@class="box"]/a//@href'):
+                # book_url = ''.join(data.xpath('.//div[@class="box"]/a[1]/@href'))
+                log.info(f"book_url: {book_url}")
+                if not book_url:
+                    continue
+                m = re.search('item\/(..\d+)', book_url)
+                log.info(f"book item: {m.group(1)}")
+                books.append(m.group(1))
+        return books 
+        
+    def download_metadata(self, log, result_queue, book_id, timeout=30):
+        BOOK_URL_PATTERN = 'https://www.books.com.tw/products/%s'
+        book_url = BOOK_URL_PATTERN % book_id
+        log.info(f"Grabbing  {book_id}, {book_url}")
+        if self._query_count >= self.MAX_QUERY_COUNT:
+            return
+        else:
+            self._query_count += 1
+
+        try:
+            r = self.browser.open(book_url, timeout=timeout)
+            raw = r.read()
+            doc = html.fromstring(raw.decode('utf-8'))
+        except Exception as e:
+            log.error(f'open page failed ({book_url}): {e}')
+            return
+        
+        lang_map = {
+            '英文':'en',
+            '繁體中文':'zh',
+            '簡體中文':'zh',
+            }
+        cover_url = ''.join(doc.xpath('.//div[@class="cnt_mod002 cover_img"]/img/@src'))
+        log.info("cover_url: " + cover_url)
+        self.cache_identifier_to_cover_url(book_id, cover_url)
+
+        title = ''.join(doc.xpath('.//div[@class="mod type02_p002 clearfix"]/h1/text()')).strip()
+        log.info(f"doc.title: {title}")
+        sub_title = ''.join(doc.xpath('.//div[@class="mod type02_p002 clearfix"]/h2/a/text()')).strip()
+        log.info(f"doc.sub_title: {sub_title}")
+        if sub_title:
+            title += ' ' + sub_title
+        log.info("title: " + title)
+
+        book_info_block = doc.xpath('.//div[@class="type02_p003 clearfix"]/ul/li')
+        log.info(f"doc.book_info_block: {book_info_block}")
+        if not book_info_block:
+            return None
+        
+        authors = []
+        for info in book_info_block:
+            # log.info(f"info.text in book_info_block: {info.text}")
+            info_itertext = "".join(info.itertext())
+            # log.info(f"info_itertext in info: {info_itertext}")
+            if info_itertext and "作者：" in info_itertext:
+                candidate = info_itertext.splitlines()
+                log.info(f"candidate: {candidate}")
+                for a in candidate:
+                    if "作者：" in a and "修改" not in a:
+                        author_line = a.replace("原文作者：", "").replace("作者：", "").strip()
+                        for author in re.split(',| ', author_line):
+                            if len(author) > 0:
+                                log.info("作者: " + author)
+                                authors.append(author)
+                continue
+            if info.text and "出版社：" in info.text:
+                # log.info(f"info.text: {info.text}")
+                publisher = "".join(info.itertext())
+                # log.info(f"publisher: {publisher}")
+                end = len(publisher)
+                if '\n' in publisher:
+                    end = publisher.index("\n")
+                publisher = publisher[publisher.index("：")+1:end]
+                # publisher = info.text.replace("出版社：", "")
+                log.info("出版社: " + publisher)
+                continue
+            if info.text and "出版日期：" in info.text:
+                pubdate = info.text.replace("出版日期：", "")
+                log.info("出版日期: " + pubdate)
+                continue
+            if info.text and "語言：" in info.text:
+                lang = info.text.replace("語言：", "").strip()#.replace("英文", "英語")
+                lang = lang_map[lang]
+                log.info("lang: " + lang)
+
+        content = ''.join(doc.xpath('//div[@class="mod_b type02_m057 clearfix"]/div//text()'))
+        # log.info("content: " + content)
+        isbn = ''.join(doc.xpath('//div[@class="mod_b type02_m058 clearfix"]/div/ul[1]/li[1]/text()')).removeprefix("ISBN：")
+        log.info("isbn: " + isbn)
+        if isbn:
+            self.cache_identifier_to_cover_url(isbn, cover_url)
+
+        meta = Metadata(title, authors)
+        meta.identifiers = {'isbn': isbn, 'bookstw': book_id}
+        meta.comments = content
+        # meta.comments = None
+        meta.publisher = publisher
+        log.info("publisher: " + meta.publisher)
+        if pubdate:
+            from calibre.utils.date import parse_date, utcnow
+            try:
+                default = utcnow().replace(day=15)
+                meta.pubdate = parse_date(pubdate, assume_utc=True, default=default)
+            except:
+                log.error('Failed to parse pubdate %r' % pubdate)
+        language = canonicalize_lang(lang)
+        if language:
+            meta.language = language
+        else:
+            meta.language = None
+        
+        log.info("language: " + meta.language)
+        rate_map = {
+            "5顆半星": "5",
+            "4顆半星": "4",
+            "3顆半星": "3",
+            "2顆半星": "2",
+            "1顆半星": "1",
+        }
+        rate = ''.join(doc.xpath('.//span[@class="bui-star s10"]/@title')).strip()
+        # rate = doc.xpath('.//span[@class="bui-star s10"]/@title')
+        log.info(f"rate: {rate}")
+        if rate:
+            meta.rating = float(rate_map[rate])
+        else:
+            meta.rating = float(0)
+        meta.rating = float(1)
+        log.info(f"rating: {meta.rating}")
+        meta.has_cover = False
+        meta.source_relevance = 0
+        return meta
+
+    def download_cover(self, log, result_queue, abort,  # {{{
+                       title=None, authors=None, identifiers={}, timeout=60, get_best_cover=False):
+        log.info(f"try to download the cover image")
+        cached_url = None
+        for id in identifiers:
+            log.info(f"id: {id}")
+            val = identifiers[id]
+            log.info(f"identifiers: {val}")
+            if ('bookstw' == id or 'isbn' == id) and val:
+                log.info(f"1 identifiers: {id}, {val}")
+                try:
+                    cached_url = self.cached_identifier_to_cover_url(val)
+                    log.info(f"1 cached_url: {cached_url}")
+                except Exception as e:
+                    log.info(f"can't find the cover")
+                    break
+        
+        if cached_url is None:
+            log.info('No cached cover found, running identify')
+            rq = Queue()
+            try:
+                self.identify(log, rq, abort, title=title, authors=authors, identifiers=identifiers)
+            except Exception as e:
+                log.info(f"can't find the cover")
+            for mi in rq:
+                for id, val in mi.identifiers:
+                    if ('bookstw' == id or 'isbn' == id) and val:
+                        log.info(f"2 identifiers: {id}, {val}")
+                        cached_url = self.cached_identifier_to_cover_url(val)
+                        log.info(f"2 cached_url: {cached_url}")
+                        break
+        
+        image = None
+        try:
+            image = self.browser.open(cached_url, timeout=timeout).read()
+        except Exception as e:
+            log.info(f"download image failed: {e}")
+        if image:
+            result_queue.put((self, image))
+            log.info(f"image put into result_queue")
+
+if __name__ == '__main__':  # tests
+    # To run these test use:
+    # calibre-debug -e __init__.py
+    from calibre.ebooks.metadata.sources.test import (test_identify_plugin,
+            title_test, authors_test, series_test)
+    test_identify_plugin(BooksTW.name,
+        [
+            # (# A book with an ISBN
+            #     {'identifiers': {'isbn': '9787802491830'}},
+            #     [ title_test('再啟動︰獲取職場生存與發展的原動力', exact=True), authors_test(['[日]大前研一']) ]
+            # ),
+            # (# A book with an ISBN
+            #     { 'identifiers': { 'isbn': '9781596591707' } ] },
+            #     [ title_test('The First Time Manager', exact=True), authors_test(['Belker, Loren B./ Topchik, Gary S./ Pratt, Sean (NRT)']) ]
+            # ),
+            # (# A book with an ISBN
+            #     { 'identifiers':{'isbn': '9780593420584'} },
+            #     [ title_test('Ideaflow: The Only Business Metric That Matters', exact=True), authors_test(['Utley, Jeremy,Klebahn, Perry']) ]
+            # ),
+            # (# A book with an ISBN
+            #     {'identifiers':{'isbn': '9780439064866'} },
+            #     [ title_test('Harry Potter and the Chamber of Secrets 美版精裝  哈利波特(2) ：消失的密室', exact=True), authors_test(['Rowling, J. K./ GrandPre, Mary (ILT)']) ]
+            # ),
+            (# A book with no ISBN specified
+                { 'authors':['陈建伟'] },
+                [ title_test("把话说到点子上", exact=True), authors_test(['陈建伟'])]
+            ),
+            # (# A book with no ISBN specified
+            #     { 'identifiers': {'mobi-asin': 'c75ada8f-5b95-40a5-86ed-d73a5ea64b48'}, 'title':"把话说到点子上", 'authors':['陈建伟'] },
+            #     [ title_test("把话说到点子上", exact=True), authors_test(['陈建伟'])]
+            # ),
+            # (# A book with no ISBN specified
+            #     { 'title':"BCG問題解決力：一生受用的策略顧問思考法", 'authors':['徐瑞廷'] },
+            #     [ title_test("BCG問題解決力：一生受用的策略顧問思考法", exact=True), authors_test(['徐瑞廷', '黃菁媺'])]
+            # ),
+            # (# A book with no ISBN specified
+            #     { 'title':"再啟動︰獲取職場生存與發展的原動力", 'authors':['[日]大前研一'] },
+            #     [ title_test("再啟動︰獲取職場生存與發展的原動力", exact=True), authors_test(['[日]大前研一'])]
+            # ),
+            # (# A book with no ISBN specified
+            #     { 'title':"天選矽島", 'authors':['黃欽勇'] },
+            #     [ title_test("天選．矽島：川普風暴下的科技島", exact=True), authors_test(['黃欽勇']) ]
+            # ),
+            # (# A book with no ISBN specified
+            #     { 'title':"Harry Potter and the Sorcerer's Stone", 'authors':['J.K. Rowling'] },
+            #     [ title_test("Harry Potter and the Sorcerer's Stone", exact=True),  authors_test(['J. K. Rowling'])]
+            # ),
+        ])
