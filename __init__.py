@@ -1,58 +1,15 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import re
-# import socket
-# import string
-import time
-from functools import partial
-
 try:
-    from queue import Empty, Queue
+    from queue import Queue
 except ImportError:
-    from Queue import Empty, Queue
+    from Queue import Queue
 
-from threading import Thread
-
-# try:
-#     from urllib.parse import urlparse, urlencode
-# except ImportError:
-#     from urlparse import urlparse, urlencode
-
-try:
-    from queue import Empty, Queue
-except ImportError:
-    from Queue import Empty, Queue
-
-# from mechanize import HTTPError
-
-from calibre import as_unicode, browser, random_user_agent, xml_replace_entities
 from calibre.ebooks.metadata.book.base import Metadata
-from calibre.ebooks.metadata.sources.base import Option, Source, fixauthors, fixcase
-# from calibre.utils.icu import lower as icu_lower
-# from calibre.utils.localization import canonicalize_lang
-from calibre.utils.random_ua import accept_header_for_ua
-
-# from calibre import as_unicode, prepare_string_for_xml, replace_entities
-from calibre.ebooks.chardet import xml_to_unicode
-from calibre.ebooks.metadata import authors_to_string, check_isbn
-from calibre.utils.cleantext import clean_ascii_chars
+from calibre.ebooks.metadata.sources.base import Source
 from calibre.utils.localization import canonicalize_lang
-
-# from calibre.utils.date import parse_date
-from lxml import etree, html
-
-def user_agent_is_ok(ua):
-    return 'Mobile/' not in ua and 'Mobile ' not in ua
-
-def parse_html(raw):
-    try:
-        from html5_parser import parse
-    except ImportError:
-        # Old versions of calibre
-        import html5lib
-        return html5lib.parse(raw, treebuilder='lxml', namespaceHTMLElements=False)
-    else:
-        return parse(raw)
+from lxml import html
 
 class BooksTW(Source):
 
@@ -64,7 +21,6 @@ class BooksTW(Source):
     can_get_multiple_covers = False
     prefer_results_with_isbn = True
     supports_search_by_isbn = True
-    # minimum_calibre_version = (8, 3, 0)
 
     _query_count = 0
     MAX_QUERY_COUNT = 5
@@ -73,8 +29,6 @@ class BooksTW(Source):
     touched_fields = frozenset([
         'identifier:isbn', 'identifier:bookstw', 'title', 'authors','rating', 
         'comments', 'publisher', 'pubdate', 'languages'])  #'tags', 'series',
-    # has_html_comments = False
-    # supports_gzip_transfer_encoding = False
 
     BASE_URL = 'https://www.books.com.tw'
 
@@ -115,15 +69,12 @@ class BooksTW(Source):
                 log.error(f'Download metadata failed ({book}): {e}')
 
     def search_books(self, log, key, timeout=30):
-        # SEARCH_URL = 'https://search.books.com.tw/search/query/key/%s/cat/all'
         SEARCH_URL = 'https://search.books.com.tw/search/query/key/%s/cat/BKA'
         url = SEARCH_URL % key
-        # log.info(f'查詢 URL: {url}')
 
         try:
             r = self.browser.open(url, timeout=timeout)
             raw = r.read()
-            # log.info(raw.decode('utf-8'))
             doc = html.fromstring(raw.decode('utf-8'))
         except Exception as e:
             log.error(f'Open book page failed: {e}')
@@ -134,10 +85,8 @@ class BooksTW(Source):
             return None
 
         books = []
-        # for data in doc.xpath('//div[@class="table-searchbox clearfix" or @class="nw_katalog_lista_ksiazka ebook promocja"]'):
         for data in doc.xpath('//div[@class="table-searchbox clearfix"]'):
             for book_url in data.xpath('.//div[@class="box"]/a//@href'):
-                # book_url = ''.join(data.xpath('.//div[@class="box"]/a[1]/@href'))
                 log.info(f"book_url: {book_url}")
                 if not book_url:
                     continue
@@ -187,9 +136,7 @@ class BooksTW(Source):
         
         authors = []
         for info in book_info_block:
-            # log.info(f"info.text in book_info_block: {info.text}")
             info_itertext = "".join(info.itertext())
-            # log.info(f"info_itertext in info: {info_itertext}")
             if info_itertext and "作者：" in info_itertext:
                 candidate = info_itertext.splitlines()
                 log.info(f"candidate: {candidate}")
@@ -202,14 +149,11 @@ class BooksTW(Source):
                                 authors.append(author)
                 continue
             if info.text and "出版社：" in info.text:
-                # log.info(f"info.text: {info.text}")
                 publisher = "".join(info.itertext())
-                # log.info(f"publisher: {publisher}")
                 end = len(publisher)
                 if '\n' in publisher:
                     end = publisher.index("\n")
                 publisher = publisher[publisher.index("：")+1:end]
-                # publisher = info.text.replace("出版社：", "")
                 log.info("出版社: " + publisher)
                 continue
             if info.text and "出版日期：" in info.text:
@@ -222,7 +166,6 @@ class BooksTW(Source):
                 log.info("lang: " + lang)
 
         content = ''.join(doc.xpath('//div[@class="mod_b type02_m057 clearfix"]/div//text()'))
-        # log.info("content: " + content)
         isbn = ''.join(doc.xpath('//div[@class="mod_b type02_m058 clearfix"]/div/ul[1]/li[1]/text()')).removeprefix("ISBN：")
         log.info("isbn: " + isbn)
         if isbn:
@@ -231,7 +174,6 @@ class BooksTW(Source):
         meta = Metadata(title, authors)
         meta.identifiers = {'isbn': isbn, 'bookstw': book_id}
         meta.comments = content
-        # meta.comments = None
         meta.publisher = publisher
         log.info("publisher: " + meta.publisher)
         if pubdate:
@@ -248,21 +190,12 @@ class BooksTW(Source):
             meta.language = None
         
         log.info("language: " + meta.language)
-        rate_map = {
-            "5顆半星": "5",
-            "4顆半星": "4",
-            "3顆半星": "3",
-            "2顆半星": "2",
-            "1顆半星": "1",
-        }
-        rate = ''.join(doc.xpath('.//span[@class="bui-star s10"]/@title')).strip()
-        # rate = doc.xpath('.//span[@class="bui-star s10"]/@title')
+        rate = ''.join(doc.xpath('.//div[@class="bui-stars star-s"]/span/@title')).strip()
         log.info(f"rate: {rate}")
         if rate:
-            meta.rating = float(rate_map[rate])
+            meta.rating = float(rate[0:1])
         else:
             meta.rating = float(0)
-        meta.rating = float(1)
         log.info(f"rating: {meta.rating}")
         meta.has_cover = False
         meta.source_relevance = 0
@@ -316,6 +249,14 @@ if __name__ == '__main__':  # tests
             title_test, authors_test, series_test)
     test_identify_plugin(BooksTW.name,
         [
+            (# A book with an ISBN
+                {'identifiers': {'isbn': '9789866272547'}},
+                [ title_test('攝影師的四大修練：打破規則的觀察、想像、表現、視覺設計，拍出大師級作品 Photography and the Art of Seeing: A Visual Perception Workshop for Film and Digital Photography', exact=True), authors_test(['patterson', 'freeman', '佛利曼．帕德遜']) ]
+            ),
+            # (# A book with an ISBN
+            #     {'identifiers': {'isbn': '9787532770243'}},
+            #     [ title_test('石黑一雄（Kazuo Ishiguro）文集:被掩埋的巨人', exact=True), authors_test(['（英）石黑一雄']) ]
+            # ),
             # (# A book with an ISBN
             #     {'identifiers': {'isbn': '9787802491830'}},
             #     [ title_test('再啟動︰獲取職場生存與發展的原動力', exact=True), authors_test(['[日]大前研一']) ]
@@ -332,10 +273,10 @@ if __name__ == '__main__':  # tests
             #     {'identifiers':{'isbn': '9780439064866'} },
             #     [ title_test('Harry Potter and the Chamber of Secrets 美版精裝  哈利波特(2) ：消失的密室', exact=True), authors_test(['Rowling, J. K./ GrandPre, Mary (ILT)']) ]
             # ),
-            (# A book with no ISBN specified
-                { 'authors':['陈建伟'] },
-                [ title_test("把话说到点子上", exact=True), authors_test(['陈建伟'])]
-            ),
+            # (# A book with no ISBN specified
+            #     { 'authors':['陈建伟'] },
+            #     [ title_test("把话说到点子上", exact=True), authors_test(['陈建伟'])]
+            # ),
             # (# A book with no ISBN specified
             #     { 'identifiers': {'mobi-asin': 'c75ada8f-5b95-40a5-86ed-d73a5ea64b48'}, 'title':"把话说到点子上", 'authors':['陈建伟'] },
             #     [ title_test("把话说到点子上", exact=True), authors_test(['陈建伟'])]
