@@ -17,7 +17,7 @@ class BooksTW(Source):
     description = 'Download metadata from books.com.tw'
     supported_platforms = ['windows', 'osx', 'linux']
     author              = 'Robin Lin'  # The author of this plugin
-    version             = (0, 0, 1)   # The version number of this plugin
+    version             = (0, 0, 2)   # The version number of this plugin
     can_get_multiple_covers = False
     prefer_results_with_isbn = True
     supports_search_by_isbn = True
