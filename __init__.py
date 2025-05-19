@@ -90,7 +90,7 @@ class BooksTW(Source):
                 log.info(f"book_url: {book_url}")
                 if not book_url:
                     continue
-                m = re.search('item\/(..\d+)', book_url)
+                m = re.search('item\/(....\d+)', book_url)
                 log.info(f"book item: {m.group(1)}")
                 books.append(m.group(1))
         return books 
@@ -280,9 +280,13 @@ if __name__ == '__main__':  # tests
     test_identify_plugin(BooksTW.name,
         [
             (# A book with an ISBN
-                {'identifiers': {'isbn': '9787302527459'}},
-                [ title_test('ROS2源代碼分析與工程應用', exact=True), authors_test(['丁亮']) ]
+                {'identifiers': {'isbn': '9789365898477'}},
+                [ title_test('Building and Deploying WebAssembly Apps: Building secure, portable, and optimized web applications with WebAssembly (English Edition)', exact=True), authors_test(['Salomonsen', 'Peter']) ]
             ),
+            # (# A book with an ISBN
+            #     {'identifiers': {'isbn': '9787302527459'}},
+            #     [ title_test('ROS2源代碼分析與工程應用', exact=True), authors_test(['丁亮']) ]
+            # ),
             # (# A book with an ISBN
             #     {'identifiers': {'isbn': '9789866272547'}},
             #     [ title_test('攝影師的四大修練：打破規則的觀察、想像、表現、視覺設計，拍出大師級作品 Photography and the Art of Seeing: A Visual Perception Workshop for Film and Digital Photography', exact=True), authors_test(['patterson', 'freeman', '佛利曼．帕德遜']) ]
